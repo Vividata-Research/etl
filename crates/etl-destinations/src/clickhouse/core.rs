@@ -418,12 +418,15 @@ where
 
     /// Rejects writing to a pre-existing ClickHouse table whose engine does
     /// not match the configured one. No-op if the table doesn't exist yet.
+    ///
+    /// Equivalence is via [`engine_equivalent`], which accepts ClickHouse
+    /// Cloud's silent `Shared{X}` substitution for the MergeTree family.
     async fn ensure_engine_matches(&self, clickhouse_table_name: &str) -> EtlResult<()> {
         let Some(existing) = self.client.table_engine(clickhouse_table_name).await? else {
             return Ok(());
         };
         let configured = self.inserter_config.engine.as_clickhouse_str();
-        if existing == configured {
+        if engine_equivalent(&existing, configured) {
             return Ok(());
         }
 
@@ -1078,6 +1081,20 @@ fn reject_pk_alters_under_replacing_merge_tree(
     Ok(())
 }
 
+/// Returns `true` if a ClickHouse engine name read from `system.tables` is
+/// equivalent to the configured engine name.
+///
+/// Accepts ClickHouse Cloud's silent `Shared{X}` substitution for the
+/// MergeTree family: a `CREATE TABLE ... ENGINE = ReplacingMergeTree`
+/// emitted by this pipeline is rewritten to `SharedReplacingMergeTree` on
+/// CH Cloud because of the shared-storage architecture. Without this
+/// equivalence, the pipeline would deadlock against its own cloud-side
+/// rewrite on every restart after the first table creation.
+fn engine_equivalent(existing: &str, configured: &str) -> bool {
+    let existing_logical = existing.strip_prefix("Shared").unwrap_or(existing);
+    existing_logical == configured
+}
+
 /// Verifies the engine's `min_server_version()` constraint against the given
 /// server version. The per-engine version requirement lives on
 /// [`ClickHouseEngine`] itself; this function is just the error-construction
@@ -1442,6 +1459,30 @@ mod tests {
     fn ensure_engine_supported_accepts_replacing_merge_tree_on_supported_server() {
         ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (23, 5)).unwrap();
         ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (24, 1)).unwrap();
+    }
+
+    #[test]
+    fn engine_equivalent_accepts_exact_match() {
+        assert!(engine_equivalent("MergeTree", "MergeTree"));
+        assert!(engine_equivalent("ReplacingMergeTree", "ReplacingMergeTree"));
+    }
+
+    #[test]
+    fn engine_equivalent_accepts_cloud_shared_prefix() {
+        // ClickHouse Cloud rewrites these on table creation; the read-back
+        // from system.tables shows the Shared* form even though the pipeline
+        // emitted the bare form in the CREATE TABLE.
+        assert!(engine_equivalent("SharedMergeTree", "MergeTree"));
+        assert!(engine_equivalent("SharedReplacingMergeTree", "ReplacingMergeTree"));
+    }
+
+    #[test]
+    fn engine_equivalent_rejects_unrelated_engines() {
+        assert!(!engine_equivalent("MergeTree", "ReplacingMergeTree"));
+        assert!(!engine_equivalent("ReplacingMergeTree", "MergeTree"));
+        assert!(!engine_equivalent("SharedMergeTree", "ReplacingMergeTree"));
+        assert!(!engine_equivalent("Log", "MergeTree"));
+        assert!(!engine_equivalent("", "MergeTree"));
     }
 
     /// Schema with composite PK `(tenant_id, id)` plus a non-PK `value`
