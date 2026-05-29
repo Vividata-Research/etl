@@ -203,6 +203,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
+        run_source_migrations: true,
     };
 
     // Initialize BigQuery destination with service account authentication
